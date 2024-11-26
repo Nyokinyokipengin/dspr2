@@ -1,4 +1,3 @@
-# calclator
 import flet as ft
 
 
