@@ -31,11 +31,11 @@ init_db()
 def load_area_data_to_db(area_data):
     with closing(sqlite3.connect('weather.db')) as conn:
         with conn:
-            for key, value in area_data["offices"].items():
+            for key, value in area_data['offices'].items():
                 conn.execute("INSERT OR IGNORE INTO areas (area_code, area_name) VALUES (?, ?)",
-                             (key, value["name"]))
+                             (key, value['name']))
 
-# 地域データのロード
+# Load area data
 area_data = {}
 try:
     with open('jma/areas.json', 'r', encoding='utf-8') as f:
