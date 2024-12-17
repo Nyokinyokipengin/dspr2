@@ -3,76 +3,66 @@ import requests
 import json
 import sqlite3
 from datetime import datetime
-from contextlib import closing
 
-def init_db():
-    with closing(sqlite3.connect('weather.db')) as conn:
-        with conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS areas (
-                    id INTEGER PRIMARY KEY,
-                    area_code TEXT NOT NULL UNIQUE,
-                    area_name TEXT NOT NULL
-                )
-            """)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS forecasts (
-                    id INTEGER PRIMARY KEY,
-                    area_code TEXT NOT NULL,
-                    publishing_office TEXT,
-                    report_datetime TEXT,
-                    weather TEXT,
-                    FOREIGN KEY (area_code) REFERENCES areas(area_code)
-                )
-            """)
+# SQLiteデータベースの初期化
+conn = sqlite3.connect('weather_forecast.db', check_same_thread=False)
+c = conn.cursor()
 
-init_db()
+# テーブルの作成
+def initialize_db():
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS regions (
+        id INTEGER PRIMARY KEY,
+        name TEXT UNIQUE
+    )''')
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS offices (
+        id INTEGER PRIMARY KEY,
+        region_id INTEGER,
+        name TEXT,
+        FOREIGN KEY(region_id) REFERENCES regions(id)
+    )''')
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS forecasts (
+        id INTEGER PRIMARY KEY,
+        office_id INTEGER,
+        publishing_office TEXT,
+        report_datetime TEXT,
+        area_name TEXT,
+        weather TEXT,
+        created_at TEXT,
+        FOREIGN KEY(office_id) REFERENCES offices(id)
+    )''')
+    conn.commit()
 
-def load_area_data_to_db(area_data):
-    with closing(sqlite3.connect('weather.db')) as conn:
-        with conn:
-            for key, value in area_data['offices'].items():
-                conn.execute("INSERT OR IGNORE INTO areas (area_code, area_name) VALUES (?, ?)",
-                             (key, value['name']))
-
-# Load area data
-area_data = {}
-try:
-    with open('jma/areas.json', 'r', encoding='utf-8') as f:
-        content = f.read()
-        if content.strip() == "":
-            raise json.JSONDecodeError("Empty file", content, 0)
-        area_data = json.loads(content)
-        load_area_data_to_db(area_data)
-except FileNotFoundError:
-    print("Error: 'jma/areas.json' ファイルが見つかりません")
-except json.JSONDecodeError as e:
-    print(f"JSONDecodeError: {e} - JSON Content: {content}")
-except Exception as e:
-    print(f"Unexpected error: {e}")
+initialize_db()
 
 def main(page: ft.Page):
     page.scroll = ft.ScrollMode.AUTO
 
-    if not area_data:
-        output = ft.Text("地域データの読み込みに失敗しました。")
-        page.controls.append(output)
-        page.update()
-        return
+    with open('jma/areas.json', 'r', encoding='utf-8') as f:
+        area_data = json.load(f)
 
-    # 地域データを地方→県の構造で整理
+    # データベースへの地域情報の保存
     regions = {}
     for key, value in area_data["centers"].items():
-        region_name = value["name"]
+        region_name = value['name']
+        c.execute('INSERT OR IGNORE INTO regions (name) VALUES (?)', (region_name,))
+        regions_db_index = c.lastrowid
         regions[region_name] = {}
 
     for key, value in area_data["offices"].items():
-        parent_center = value["parent"]
-        if parent_center in area_data["centers"]:
-            region_name = area_data["centers"][parent_center]["name"]
-            regions[region_name][key] = value["name"]
+        parent_center = value['parent']
+        if parent_center in area_data['centers']:
+            region_name = area_data['centers'][parent_center]['name']
+            office_name = value['name']
+            c.execute('INSERT OR IGNORE INTO offices (region_id, name) VALUES ((SELECT id FROM regions WHERE name = ?), ?)', (region_name, office_name))
+            regions[region_name][key] = office_name
 
-    # ドロップダウンの初期化
+    conn.commit()
+
+    selected_region = None
+
     region_dropdown = ft.Dropdown(
         label="地方を選択してください：",
         options=[ft.dropdown.Option(region) for region in regions.keys()],
@@ -88,8 +78,10 @@ def main(page: ft.Page):
     )
 
     output = ft.Text()
-    
-    def update_office_dropdown(selected_region):
+
+    def update_office_dropdown(region):
+        nonlocal selected_region
+        selected_region = region
         if selected_region:
             office_dropdown.options = [
                 ft.dropdown.Option(key, name)
@@ -105,45 +97,44 @@ def main(page: ft.Page):
             response = requests.get(f'https://www.jma.go.jp/bosai/forecast/data/forecast/{area_code}.json')
             if response.status_code == 200:
                 forecast_data = response.json()
-                save_forecast_to_db(area_code, forecast_data)
-                display_forecast(area_code)
+                save_forecast_data(area_code, forecast_data)
+                display_forecast(forecast_data)
             else:
                 output.value = f"Error: {response.status_code}"
                 page.update()
 
-    def save_forecast_to_db(area_code, forecast_data):
-        with closing(sqlite3.connect('weather.db')) as conn:
-            with conn:
-                for entry in forecast_data:
-                    publishing_office = entry.get("publishingOffice", "不明")
-                    report_datetime = entry.get("reportDatetime", "不明")
-                    for time_series in entry.get("timeSeries", []):
-                        for area in time_series.get("areas", []):
-                            weather = area.get("weathers", ["情報なし"])[0]
-                            conn.execute("""
-                                INSERT INTO forecasts (area_code, publishing_office, report_datetime, weather)
-                                VALUES (?, ?, ?, ?)
-                            """, (area_code, publishing_office, report_datetime, weather))
+    def save_forecast_data(area_code, data):
+        office_name = regions[selected_region][area_code]
+        c.execute('SELECT id FROM offices WHERE name = ?', (office_name,))
+        office_id = c.fetchone()[0]
+        for entry in data:
+            publishing_office = entry.get("publishingOffice", "不明")
+            report_datetime = entry.get("reportDatetime", "不明")
+            for time_series in entry.get("timeSeries", []):
+                for area in time_series.get("areas", []):
+                    area_name = area.get("area", {}).get("name", "不明")
+                    weather = area.get("weathers", ["情報なし"])[0]
+                    created_at = datetime.now().isoformat()
+                    c.execute('''
+                    INSERT INTO forecasts (office_id, publishing_office, report_datetime, area_name, weather, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ''', (office_id, publishing_office, report_datetime, area_name, weather, created_at))
+        conn.commit()
 
-    def get_forecast_from_db(area_code):
-        with closing(sqlite3.connect('weather.db')) as conn:
-            with conn:
-                cursor = conn.execute("""
-                    SELECT publishing_office, report_datetime, weather FROM forecasts
-                    WHERE area_code = ?
-                    ORDER BY report_datetime DESC
-                """, (area_code,))
-                return cursor.fetchall()
-
-    def display_forecast(area_code):
-        forecasts = get_forecast_from_db(area_code)
+    def display_forecast(data):
         page.controls.clear()
         page.controls.append(ft.Row([back_button]))
-        for publishing_office, report_datetime, weather in forecasts:
+        for entry in data:
+            publishing_office = entry.get("publishingOffice", "不明")
+            report_datetime = entry.get("reportDatetime", "不明")
             title = ft.Text(f"{publishing_office} {report_datetime}", style=ft.TextStyle(size=24, weight="bold"))
             page.controls.append(title)
-            weather_text = ft.Text(f"天気: {weather}")
-            page.controls.append(weather_text)
+            for time_series in entry.get("timeSeries", []):
+                for area in time_series.get("areas", []):
+                    area_name = area.get("area", {}).get("name", "不明")
+                    weather = area.get("weathers", ["情報なし"])[0]
+                    weather_text = ft.Text(f"地域: {area_name} 天気: {weather}")
+                    page.controls.append(weather_text)
         page.update()
 
     def show_area_selection(e=None):
@@ -151,10 +142,8 @@ def main(page: ft.Page):
         page.controls.append(ft.Column([region_dropdown, office_dropdown, output]))
         page.update()
 
-    # 「戻る」ボタン
     back_button = ft.ElevatedButton(text="戻る", on_click=show_area_selection)
 
-    # 地域選択画面を初期表示
     show_area_selection()
 
 ft.app(target=main)
