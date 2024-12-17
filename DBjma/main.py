@@ -3,9 +3,16 @@ import requests
 import json
 import sqlite3
 from datetime import datetime
+import os
 
 # SQLiteデータベースの初期化
-conn = sqlite3.connect('weather_forecast.db', check_same_thread=False)
+db_path = 'weather_forecast.db'
+
+# 既存のデータベースファイルを削除
+if os.path.exists(db_path):
+    os.remove(db_path)
+
+conn = sqlite3.connect(db_path, check_same_thread=False)
 c = conn.cursor()
 
 # テーブルの作成
@@ -28,7 +35,7 @@ def initialize_db():
         office_id INTEGER,
         publishing_office TEXT,
         report_datetime TEXT,
-        area_name TEXT,
+        area_name TEXT,  -- 修正された部分
         weather TEXT,
         created_at TEXT,
         FOREIGN KEY(office_id) REFERENCES offices(id)
